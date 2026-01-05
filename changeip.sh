@@ -5,7 +5,7 @@ IFACE="ens3"
 
 [ "$EUID" -ne 0 ] && echo "Run as root" && exit 1
 
-# گرفتن IP اصلی فعلی
+# گرفتن IP اصلی
 PRIMARY_IP=$(awk "/iface $IFACE inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
 
 # گرفتن aliasها
@@ -47,41 +47,59 @@ BACKUP="$CFG.bak.$(date +%F_%H-%M-%S)"
 cp "$CFG" "$BACKUP"
 echo "Backup saved: $BACKUP"
 
-# فایل جدید با تغییر IP اصلی و gateway
-awk -v PRIMARY="$PRIMARY_IP" -v TARGET="$TARGET_IP" -v GW="$NEW_GATEWAY" '
-{
-  if ($1=="iface" && $2=="ens3" && $3=="inet" && $4=="static") {
+# خواندن فایل و جایگزینی IP و gateway
+inblock=0
+gw_added=0
+> /tmp/interfaces.new
+while IFS= read -r line; do
+  # شروع بلاک ens3
+  if [[ $line =~ ^iface\ ens3\ inet\ static ]]; then
     inblock=1
-    printed_gw=0
-    print $0
-    next
-  }
-  if (inblock && $1=="address") {
-    print "    address   " TARGET
-    next
-  }
-  if (inblock && $1=="gateway") {
-    print "    gateway   " GW
-    printed_gw=1
-    next
-  }
-  if (inblock && NF==0) {
-    if (printed_gw==0) {print "    gateway   " GW}
+    gw_added=0
+    echo "$line" >> /tmp/interfaces.new
+    continue
+  fi
+
+  # تغییر address
+  if [[ $inblock -eq 1 && $line =~ ^[[:space:]]*address ]]; then
+    echo "    address   $TARGET_IP" >> /tmp/interfaces.new
+    continue
+  fi
+
+  # تغییر gateway
+  if [[ $inblock -eq 1 && $line =~ ^[[:space:]]*gateway ]]; then
+    echo "    gateway   $NEW_GATEWAY" >> /tmp/interfaces.new
+    gw_added=1
+    continue
+  fi
+
+  # پایان بلاک ens3
+  if [[ $inblock -eq 1 && -z $line ]]; then
+    if [[ $gw_added -eq 0 ]]; then
+      echo "    gateway   $NEW_GATEWAY" >> /tmp/interfaces.new
+    fi
     inblock=0
-  }
+  fi
+
   # بلاک alias
-  if ($1=="iface" && $2 ~ /^ens3:[0-9]+$/ && $3=="inet" && $4=="static") {
+  if [[ $line =~ ^iface\ ens3:[0-9]+ ]]; then
     inalias=1
-    print $0
-    next
-  }
-  if (inalias && $1=="address") {
-    print "    address   " PRIMARY
-    next
-  }
-  if (inalias && NF==0) {inalias=0}
-  print $0
-}' "$CFG" > /tmp/interfaces.new
+    echo "$line" >> /tmp/interfaces.new
+    continue
+  fi
+
+  if [[ $inalias -eq 1 && $line =~ ^[[:space:]]*address ]]; then
+    echo "    address   $PRIMARY_IP" >> /tmp/interfaces.new
+    continue
+  fi
+
+  if [[ $inalias -eq 1 && -z $line ]]; then
+    inalias=0
+  fi
+
+  # خطوط دیگر بدون تغییر
+  echo "$line" >> /tmp/interfaces.new
+done < "$CFG"
 
 mv /tmp/interfaces.new "$CFG"
 
