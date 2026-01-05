@@ -1,4 +1,4 @@
-cat > swap-primary-ip.sh <<'EOF'
+cat > changeip <<'EOF'
 #!/bin/bash
 
 CFG="/etc/network/interfaces"
@@ -9,11 +9,6 @@ IFACE="ens3"
 PRIMARY_IP=$(awk "/iface $IFACE inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
 
 mapfile -t ALIASES < <(awk "/iface $IFACE:[0-9]+ inet static/ {print \$2}" "$CFG")
-
-if [ ${#ALIASES[@]} -eq 0 ]; then
-  echo "No alias IPs found"
-  exit 1
-fi
 
 OPTIONS=()
 for a in "${ALIASES[@]}"; do
@@ -33,15 +28,6 @@ done
 TARGET_ALIAS=$(echo "$CHOICE" | awk '{print $1}')
 TARGET_IP=$(echo "$CHOICE" | awk '{print $3}')
 
-echo
-echo "Swapping:"
-echo "ens3        : $PRIMARY_IP"
-echo "$TARGET_ALIAS : $TARGET_IP"
-echo
-
-read -p "Continue? (y/n): " c
-[ "$c" != "y" ] && exit 0
-
 BACKUP="$CFG.bak.$(date +%F_%H-%M-%S)"
 cp "$CFG" "$BACKUP"
 
@@ -50,10 +36,5 @@ sed -i \
   -e "/iface $TARGET_ALIAS inet static/{:b;n;/address/{s/$TARGET_IP/$PRIMARY_IP/;bb}}" \
   "$CFG"
 
-echo "File updated. Backup: $BACKUP"
-echo "Restarting network..."
-
 systemctl restart networking || service networking restart
-
-echo "Done."
 EOF
