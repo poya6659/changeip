@@ -1,85 +1,72 @@
 #!/bin/bash
 
-IFACE="ens3"
 CFG="/etc/network/interfaces"
-BACKUP="/etc/network/interfaces.bak.$(date +%F_%H-%M)"
+IFACE="ens3"
+IDX="$1"
 
-TARGET_ALIAS="$1"
-
-if [ -z "$TARGET_ALIAS" ]; then
+if [ -z "$IDX" ]; then
   echo "Usage: sudo ./switch-primary-ip.sh <alias-number>"
-  echo "Example: sudo ./switch-primary-ip.sh 1   # ens3:1 becomes primary"
+  echo "Example: sudo ./switch-primary-ip.sh 1"
   exit 1
 fi
 
-ALIAS_IFACE="${IFACE}:${TARGET_ALIAS}"
+ALIAS="${IFACE}:${IDX}"
 
-echo "▶ Switching primary IP to $ALIAS_IFACE"
-echo "▶ Backup: $BACKUP"
+if ! grep -q "^auto $ALIAS" "$CFG"; then
+  echo "❌ $ALIAS not found in $CFG"
+  exit 1
+fi
 
+BACKUP="${CFG}.bak.$(date +%F_%H-%M-%S)"
 cp "$CFG" "$BACKUP" || exit 1
+echo "✔ Backup created: $BACKUP"
 
-# استخراج بلاک ens3
-PRIMARY_BLOCK=$(awk "
-/^auto $IFACE$/ {flag=1}
-/^$/ && flag {print; exit}
-flag {print}
-" "$CFG")
+# استخراج IPها
+PRIMARY_IP=$(awk "/iface $IFACE inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
+ALIAS_IP=$(awk "/iface $ALIAS inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
+NETMASK=$(awk "/iface $IFACE inet static/{f=1} f&&/netmask/{print \$2; exit}" "$CFG")
+HWADDR=$(awk "/iface $IFACE inet static/{f=1} f&&/hwaddress/{print \$3; exit}" "$CFG")
 
-# استخراج بلاک ens3:X
-ALIAS_BLOCK=$(awk "
-/^auto $ALIAS_IFACE$/ {flag=1}
-/^$/ && flag {print; exit}
-flag {print}
-" "$CFG")
+GATEWAY="$(echo "$ALIAS_IP" | awk -F. '{print $1"."$2"."$3".1"}')"
 
-if [ -z "$ALIAS_BLOCK" ]; then
-  echo "❌ Alias $ALIAS_IFACE not found"
-  exit 1
-fi
+# ساخت فایل جدید
+awk -v IFACE="$IFACE" -v ALIAS="$ALIAS" \
+    -v PIP="$PRIMARY_IP" -v AIP="$ALIAS_IP" \
+    -v MASK="$NETMASK" -v GW="$GATEWAY" -v HW="$HWADDR" '
+BEGIN {skip=0}
 
-# گرفتن IP و netmask
-NEW_IP=$(echo "$ALIAS_BLOCK" | awk '/address/ {print $2}')
-NETMASK=$(echo "$ALIAS_BLOCK" | awk '/netmask/ {print $2}')
-GATEWAY=$(echo "$NEW_IP" | awk -F. '{print $1"."$2"."$3".1"}')
+/^auto ens3$/ {skip=1; next}
+/^iface ens3 inet static/ {next}
+/^auto ens3:[0-9]+$/ {skip=1; next}
+/^iface ens3:[0-9]+ inet static/ {next}
 
-# بلاک جدید ens3
-NEW_PRIMARY_BLOCK=$(cat <<EOF
-auto $IFACE
-iface $IFACE inet static
-    address   $NEW_IP
-    netmask   $NETMASK
-    gateway   $GATEWAY
-    hwaddress ether $(echo "$PRIMARY_BLOCK" | awk '/hwaddress/ {print $3}')
-    dns-nameservers 1.1.1.1 8.8.8.8
+/^$/ {if(skip){skip=0; next}}
 
-EOF
-)
+!skip {print}
+END {
+print ""
+print "auto " IFACE
+print "iface " IFACE " inet static"
+print "    address   " AIP
+print "    netmask   " MASK
+print "    gateway   " GW
+if(HW!="") print "    hwaddress ether " HW
+print "    dns-nameservers 1.1.1.1 8.8.8.8"
+print ""
+print "auto " ALIAS
+print "iface " ALIAS " inet static"
+print "    address   " PIP
+print "    netmask   " MASK
+print ""
+}
+' "$CFG" > /tmp/interfaces.new
 
-# بلاک جدید alias
-OLD_PRIMARY_IP=$(echo "$PRIMARY_BLOCK" | awk '/address/ {print $2}')
+mv /tmp/interfaces.new "$CFG"
 
-NEW_ALIAS_BLOCK=$(cat <<EOF
-auto $ALIAS_IFACE
-iface $ALIAS_IFACE inet static
-    address   $OLD_PRIMARY_IP
-    netmask   $NETMASK
+echo "✔ interfaces file updated"
 
-EOF
-)
-
-# حذف بلاک‌های قبلی
-sed -i "/^auto $IFACE$/,/^$/d" "$CFG"
-sed -i "/^auto $ALIAS_IFACE$/,/^$/d" "$CFG"
-
-# اضافه کردن بلاک‌های جدید
-echo "$NEW_PRIMARY_BLOCK" >> "$CFG"
-echo "$NEW_ALIAS_BLOCK" >> "$CFG"
-
-echo "✅ File updated."
-
-echo "▶ Restarting network..."
+echo "▶ Restarting networking..."
 systemctl restart networking || service networking restart
 
 echo "🎉 Done. New primary IP:"
-ip -4 addr show dev $IFACE
+ip -4 addr show dev ens3
