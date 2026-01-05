@@ -5,16 +5,20 @@ IFACE="ens3"
 
 [ "$EUID" -ne 0 ] && echo "Run as root" && exit 1
 
-# گرفتن IP اصلی
+# IP اصلی
 PRIMARY_IP=$(awk "/iface $IFACE inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
 
-# گرفتن aliasها
-mapfile -t ALIASES < <(awk "/iface $IFACE:[0-9]+ inet static/{print \$2}" "$CFG")
+# گرفتن aliasها و IPهایشان
+declare -A ALIAS_IPS
+while read -r alias; do
+    ip=$(awk "/iface $alias inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
+    ALIAS_IPS["$alias"]="$ip"
+done < <(awk "/iface $IFACE:[0-9]+/ {print \$2}" "$CFG")
 
+# گزینه‌ها برای منو
 OPTIONS=()
-for a in "${ALIASES[@]}"; do
-  ip=$(awk "/iface $a inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
-  OPTIONS+=("$a → $ip")
+for a in "${!ALIAS_IPS[@]}"; do
+    OPTIONS+=("$a → ${ALIAS_IPS[$a]}")
 done
 
 echo "Primary IP:"
@@ -27,9 +31,9 @@ select CHOICE in "${OPTIONS[@]}"; do
 done
 
 TARGET_ALIAS=$(echo "$CHOICE" | awk '{print $1}')
-TARGET_IP=$(echo "$CHOICE" | awk '{print $3}')
+TARGET_IP="${ALIAS_IPS[$TARGET_ALIAS]}"
 
-# Gateway جدید: سه بخش اول IP + .1
+# Gateway جدید
 NEW_GATEWAY=$(echo "$TARGET_IP" | awk -F. '{print $1"."$2"."$3".1"}')
 
 echo
@@ -47,58 +51,64 @@ BACKUP="$CFG.bak.$(date +%F_%H-%M-%S)"
 cp "$CFG" "$BACKUP"
 echo "Backup saved: $BACKUP"
 
-# خواندن فایل و جایگزینی IP و gateway
-inblock=0
-gw_added=0
+# خواندن فایل و تغییر IP اصلی و alias انتخاب شده
 > /tmp/interfaces.new
+inblock=0
+inalias=""
+gw_added=0
+
 while IFS= read -r line; do
-  # شروع بلاک ens3
-  if [[ $line =~ ^iface\ ens3\ inet\ static ]]; then
-    inblock=1
-    gw_added=0
-    echo "$line" >> /tmp/interfaces.new
-    continue
-  fi
-
-  # تغییر address
-  if [[ $inblock -eq 1 && $line =~ ^[[:space:]]*address ]]; then
-    echo "    address   $TARGET_IP" >> /tmp/interfaces.new
-    continue
-  fi
-
-  # تغییر gateway
-  if [[ $inblock -eq 1 && $line =~ ^[[:space:]]*gateway ]]; then
-    echo "    gateway   $NEW_GATEWAY" >> /tmp/interfaces.new
-    gw_added=1
-    continue
-  fi
-
-  # پایان بلاک ens3
-  if [[ $inblock -eq 1 && -z $line ]]; then
-    if [[ $gw_added -eq 0 ]]; then
-      echo "    gateway   $NEW_GATEWAY" >> /tmp/interfaces.new
+    # شروع بلاک ens3
+    if [[ $line =~ ^iface\ ens3\ inet\ static ]]; then
+        inblock=1
+        gw_added=0
+        echo "$line" >> /tmp/interfaces.new
+        continue
     fi
-    inblock=0
-  fi
 
-  # بلاک alias
-  if [[ $line =~ ^iface\ ens3:[0-9]+ ]]; then
-    inalias=1
+    if [[ $inblock -eq 1 && $line =~ ^[[:space:]]*address ]]; then
+        echo "    address   $TARGET_IP" >> /tmp/interfaces.new
+        continue
+    fi
+
+    if [[ $inblock -eq 1 && $line =~ ^[[:space:]]*gateway ]]; then
+        echo "    gateway   $NEW_GATEWAY" >> /tmp/interfaces.new
+        gw_added=1
+        continue
+    fi
+
+    if [[ $inblock -eq 1 && -z $line ]]; then
+        if [[ $gw_added -eq 0 ]]; then
+            echo "    gateway   $NEW_GATEWAY" >> /tmp/interfaces.new
+        fi
+        inblock=0
+    fi
+
+    # بلاک aliasها
+    if [[ $line =~ ^iface\ ens3:[0-9]+ ]]; then
+        alias_name=$(echo $line | awk '{print $2}')
+        inalias="$alias_name"
+        echo "$line" >> /tmp/interfaces.new
+        continue
+    fi
+
+    if [[ -n "$inalias" && $line =~ ^[[:space:]]*address ]]; then
+        # فقط IP alias انتخاب شده با IP اصلی قبلی swap شود
+        if [[ "$inalias" == "$TARGET_ALIAS" ]]; then
+            echo "    address   $PRIMARY_IP" >> /tmp/interfaces.new
+        else
+            echo "$line" >> /tmp/interfaces.new
+        fi
+        continue
+    fi
+
+    # پایان alias
+    if [[ -n "$inalias" && -z $line ]]; then
+        inalias=""
+    fi
+
+    # خطوط دیگر بدون تغییر
     echo "$line" >> /tmp/interfaces.new
-    continue
-  fi
-
-  if [[ $inalias -eq 1 && $line =~ ^[[:space:]]*address ]]; then
-    echo "    address   $PRIMARY_IP" >> /tmp/interfaces.new
-    continue
-  fi
-
-  if [[ $inalias -eq 1 && -z $line ]]; then
-    inalias=0
-  fi
-
-  # خطوط دیگر بدون تغییر
-  echo "$line" >> /tmp/interfaces.new
 done < "$CFG"
 
 mv /tmp/interfaces.new "$CFG"
