@@ -5,10 +5,13 @@ IFACE="ens3"
 
 [ "$EUID" -ne 0 ] && echo "Run as root" && exit 1
 
+# گرفتن IP اصلی
 PRIMARY_IP=$(awk "/iface $IFACE inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
 
-mapfile -t ALIASES < <(awk "/iface $IFACE:[0-9]+ inet static/ {print \$2}" "$CFG")
+# گرفتن aliasها
+mapfile -t ALIASES < <(awk "/iface $IFACE:[0-9]+ inet static/{print \$2}" "$CFG")
 
+# آماده‌سازی گزینه‌ها برای منو
 OPTIONS=()
 for a in "${ALIASES[@]}"; do
   ip=$(awk "/iface $a inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
@@ -27,7 +30,7 @@ done
 TARGET_ALIAS=$(echo "$CHOICE" | awk '{print $1}')
 TARGET_IP=$(echo "$CHOICE" | awk '{print $3}')
 
-# ساخت gateway جدید: آخرین بخش 1
+# ساخت gateway جدید (.1 آخر)
 NEW_GATEWAY=$(echo "$TARGET_IP" | awk -F. '{print $1"."$2"."$3".1"}')
 
 echo
@@ -40,21 +43,50 @@ echo
 read -p "Continue? (y/n): " c
 [ "$c" != "y" ] && exit 0
 
+# بکاپ
 BACKUP="$CFG.bak.$(date +%F_%H-%M-%S)"
 cp "$CFG" "$BACKUP"
+echo "Backup saved: $BACKUP"
 
-# swap address ها
-sed -i \
-  -e "/iface $IFACE inet static/{:a;n;/address/{s/$PRIMARY_IP/$TARGET_IP/;ba}}" \
-  -e "/iface $TARGET_ALIAS inet static/{:b;n;/address/{s/$TARGET_IP/$PRIMARY_IP/;bb}}" \
-  "$CFG"
+# swap IPs
+awk -v PRIMARY="$PRIMARY_IP" -v TARGET="$TARGET_IP" -v GW="$NEW_GATEWAY" '
+{
+  if ($1=="iface" && $2=="ens3" && $3=="inet" && $4=="static") {
+    inblock=1
+    print $0
+    next
+  }
+  if (inblock && $1=="address") {
+    print "    address   " TARGET
+    next
+  }
+  if (inblock && $1=="gateway") {
+    print "    gateway   " GW
+    next
+  }
+  if (inblock && NF==0) {
+    inblock=0
+  }
+  if ($1=="iface" && $2 ~ /^ens3:[0-9]+$/ && $3=="inet" && $4=="static") {
+    inblock2=1
+    print $0
+    next
+  }
+  if (inblock2 && $1=="address") {
+    print "    address   " PRIMARY
+    next
+  }
+  if (inblock2 && NF==0) {
+    inblock2=0
+  }
+  print $0
+}' "$CFG" > /tmp/interfaces.new
 
-# تغییر gateway به gateway جدید
-sed -i "/iface $IFACE inet static/{:g;n;/gateway/{s/.*/    gateway   $NEW_GATEWAY/;g}}" "$CFG"
+# جایگزینی فایل
+mv /tmp/interfaces.new "$CFG"
 
-echo "File updated. Backup: $BACKUP"
-echo "Restarting network..."
-
+# ریستارت شبکه
 systemctl restart networking || service networking restart
 
 echo "Done."
+ip -4 addr show ens3
