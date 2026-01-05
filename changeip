@@ -1,10 +1,12 @@
-cat > changeip <<'EOF'
 #!/bin/bash
 
 CFG="/etc/network/interfaces"
 IFACE="ens3"
 
-[ "$EUID" -ne 0 ] && echo "Run as root" && exit 1
+if [ "$EUID" -ne 0 ]; then
+  echo "Run as root"
+  exit 1
+fi
 
 PRIMARY_IP=$(awk "/iface $IFACE inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
 
@@ -19,7 +21,7 @@ done
 echo "Primary IP:"
 echo "ens3 → $PRIMARY_IP"
 echo
-echo "Select IP to make PRIMARY:"
+echo "Select IP to make PRIMARY (number only):"
 
 select CHOICE in "${OPTIONS[@]}"; do
   [ -n "$CHOICE" ] && break
@@ -27,6 +29,15 @@ done
 
 TARGET_ALIAS=$(echo "$CHOICE" | awk '{print $1}')
 TARGET_IP=$(echo "$CHOICE" | awk '{print $3}')
+
+echo
+echo "Swapping IPs:"
+echo "ens3        : $PRIMARY_IP"
+echo "$TARGET_ALIAS : $TARGET_IP"
+echo
+
+read -p "Continue? (y/n): " c
+[ "$c" != "y" ] && exit 0
 
 BACKUP="$CFG.bak.$(date +%F_%H-%M-%S)"
 cp "$CFG" "$BACKUP"
@@ -36,5 +47,9 @@ sed -i \
   -e "/iface $TARGET_ALIAS inet static/{:b;n;/address/{s/$TARGET_IP/$PRIMARY_IP/;bb}}" \
   "$CFG"
 
+echo "File updated. Backup: $BACKUP"
+echo "Restarting network..."
+
 systemctl restart networking || service networking restart
-EOF
+
+echo "Done."
