@@ -1,62 +1,85 @@
 #!/bin/bash
 
 IFACE="ens3"
+CFG="/etc/network/interfaces"
+BACKUP="/etc/network/interfaces.bak.$(date +%F_%H-%M)"
 
-clear
-echo "==== Primary IP Setter for $IFACE ===="
-echo
+TARGET_ALIAS="$1"
 
-# گرفتن IPهای IPv4
-mapfile -t IPS < <(ip -o -4 addr show dev "$IFACE" | awk '{print $4}')
-
-if [ ${#IPS[@]} -eq 0 ]; then
-  echo "❌ No IPv4 address found on $IFACE"
+if [ -z "$TARGET_ALIAS" ]; then
+  echo "Usage: sudo ./switch-primary-ip.sh <alias-number>"
+  echo "Example: sudo ./switch-primary-ip.sh 1   # ens3:1 becomes primary"
   exit 1
 fi
 
-echo "Available IPs on $IFACE:"
-select PRIMARY in "${IPS[@]}"; do
-  [ -n "$PRIMARY" ] && break
-done
+ALIAS_IFACE="${IFACE}:${TARGET_ALIAS}"
 
-echo
-echo "✅ Selected primary IP: $PRIMARY"
-echo
+echo "▶ Switching primary IP to $ALIAS_IFACE"
+echo "▶ Backup: $BACKUP"
 
-read -p "⚠️ Network will restart. Continue? (y/n): " CONFIRM
-[ "$CONFIRM" != "y" ] && exit 0
+cp "$CFG" "$BACKUP" || exit 1
 
-# بقیه IPها
-OTHERS=()
-for ip in "${IPS[@]}"; do
-  [ "$ip" != "$PRIMARY" ] && OTHERS+=("$ip")
-done
+# استخراج بلاک ens3
+PRIMARY_BLOCK=$(awk "
+/^auto $IFACE$/ {flag=1}
+/^$/ && flag {print; exit}
+flag {print}
+" "$CFG")
 
-echo
-echo "▶ Reordering IPs on $IFACE ..."
+# استخراج بلاک ens3:X
+ALIAS_BLOCK=$(awk "
+/^auto $ALIAS_IFACE$/ {flag=1}
+/^$/ && flag {print; exit}
+flag {print}
+" "$CFG")
 
-# حذف همه IPها
-for ip in "${IPS[@]}"; do
-  ip addr del "$ip" dev "$IFACE"
-done
-
-# اضافه کردن IP اصلی اول
-ip addr add "$PRIMARY" dev "$IFACE"
-
-# اضافه کردن بقیه IPها
-for ip in "${OTHERS[@]}"; do
-  ip addr add "$ip" dev "$IFACE"
-done
-
-# ریستارت شبکه
-if systemctl is-active --quiet networking; then
-  systemctl restart networking
-elif systemctl is-active --quiet NetworkManager; then
-  systemctl restart NetworkManager
-else
-  echo "⚠️ Network service not detected, skipping restart"
+if [ -z "$ALIAS_BLOCK" ]; then
+  echo "❌ Alias $ALIAS_IFACE not found"
+  exit 1
 fi
 
-echo
-echo "🎉 Done! Current IP order:"
-ip -4 addr show dev "$IFACE"
+# گرفتن IP و netmask
+NEW_IP=$(echo "$ALIAS_BLOCK" | awk '/address/ {print $2}')
+NETMASK=$(echo "$ALIAS_BLOCK" | awk '/netmask/ {print $2}')
+GATEWAY=$(echo "$NEW_IP" | awk -F. '{print $1"."$2"."$3".1"}')
+
+# بلاک جدید ens3
+NEW_PRIMARY_BLOCK=$(cat <<EOF
+auto $IFACE
+iface $IFACE inet static
+    address   $NEW_IP
+    netmask   $NETMASK
+    gateway   $GATEWAY
+    hwaddress ether $(echo "$PRIMARY_BLOCK" | awk '/hwaddress/ {print $3}')
+    dns-nameservers 1.1.1.1 8.8.8.8
+
+EOF
+)
+
+# بلاک جدید alias
+OLD_PRIMARY_IP=$(echo "$PRIMARY_BLOCK" | awk '/address/ {print $2}')
+
+NEW_ALIAS_BLOCK=$(cat <<EOF
+auto $ALIAS_IFACE
+iface $ALIAS_IFACE inet static
+    address   $OLD_PRIMARY_IP
+    netmask   $NETMASK
+
+EOF
+)
+
+# حذف بلاک‌های قبلی
+sed -i "/^auto $IFACE$/,/^$/d" "$CFG"
+sed -i "/^auto $ALIAS_IFACE$/,/^$/d" "$CFG"
+
+# اضافه کردن بلاک‌های جدید
+echo "$NEW_PRIMARY_BLOCK" >> "$CFG"
+echo "$NEW_ALIAS_BLOCK" >> "$CFG"
+
+echo "✅ File updated."
+
+echo "▶ Restarting network..."
+systemctl restart networking || service networking restart
+
+echo "🎉 Done. New primary IP:"
+ip -4 addr show dev $IFACE
