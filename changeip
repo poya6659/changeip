@@ -1,3 +1,4 @@
+cat > swap-primary-ip.sh <<'EOF'
 #!/bin/bash
 
 CFG="/etc/network/interfaces"
@@ -5,29 +6,27 @@ IFACE="ens3"
 
 [ "$EUID" -ne 0 ] && echo "Run as root" && exit 1
 
-# گرفتن IP اصلی
 PRIMARY_IP=$(awk "/iface $IFACE inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
 
-# گرفتن aliasها و IPها
-mapfile -t ALIASES < <(awk "/^iface $IFACE:[0-9]+ inet static/ {print \$2}" "$CFG")
+mapfile -t ALIASES < <(awk "/iface $IFACE:[0-9]+ inet static/ {print \$2}" "$CFG")
 
 if [ ${#ALIASES[@]} -eq 0 ]; then
-  echo "❌ No alias IPs found"
+  echo "No alias IPs found"
   exit 1
 fi
 
-IPS=()
+OPTIONS=()
 for a in "${ALIASES[@]}"; do
   ip=$(awk "/iface $a inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
-  IPS+=("$a → $ip")
+  OPTIONS+=("$a → $ip")
 done
 
-echo "==== Current Primary IP ===="
+echo "Primary IP:"
 echo "ens3 → $PRIMARY_IP"
 echo
-echo "==== Select IP to make PRIMARY ===="
+echo "Select IP to make PRIMARY:"
 
-select CHOICE in "${IPS[@]}"; do
+select CHOICE in "${OPTIONS[@]}"; do
   [ -n "$CHOICE" ] && break
 done
 
@@ -36,7 +35,7 @@ TARGET_IP=$(echo "$CHOICE" | awk '{print $3}')
 
 echo
 echo "Swapping:"
-echo "ens3      : $PRIMARY_IP"
+echo "ens3        : $PRIMARY_IP"
 echo "$TARGET_ALIAS : $TARGET_IP"
 echo
 
@@ -45,17 +44,16 @@ read -p "Continue? (y/n): " c
 
 BACKUP="$CFG.bak.$(date +%F_%H-%M-%S)"
 cp "$CFG" "$BACKUP"
-echo "✔ Backup: $BACKUP"
 
-# جابه‌جایی IPها (فقط address)
 sed -i \
   -e "/iface $IFACE inet static/{:a;n;/address/{s/$PRIMARY_IP/$TARGET_IP/;ba}}" \
   -e "/iface $TARGET_ALIAS inet static/{:b;n;/address/{s/$TARGET_IP/$PRIMARY_IP/;bb}}" \
   "$CFG"
 
-echo "✔ IPs swapped in file"
+echo "File updated. Backup: $BACKUP"
+echo "Restarting network..."
 
-echo "▶ Restarting network..."
 systemctl restart networking || service networking restart
 
-echo "🎉 Done"
+echo "Done."
+EOF
