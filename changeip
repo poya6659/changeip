@@ -3,97 +3,59 @@
 CFG="/etc/network/interfaces"
 IFACE="ens3"
 
-if [ "$EUID" -ne 0 ]; then
-  echo "❌ Run as root"
+[ "$EUID" -ne 0 ] && echo "Run as root" && exit 1
+
+# گرفتن IP اصلی
+PRIMARY_IP=$(awk "/iface $IFACE inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
+
+# گرفتن aliasها و IPها
+mapfile -t ALIASES < <(awk "/^iface $IFACE:[0-9]+ inet static/ {print \$2}" "$CFG")
+
+if [ ${#ALIASES[@]} -eq 0 ]; then
+  echo "❌ No alias IPs found"
   exit 1
 fi
 
-# گرفتن IPهای ens3 و aliasها
-mapfile -t IFACES < <(awk '
-/^auto ens3$/ {print "ens3"}
-/^auto ens3:[0-9]+$/ {print $2}
-' "$CFG")
-
-if [ ${#IFACES[@]} -eq 0 ]; then
-  echo "❌ No ens3 interfaces found"
-  exit 1
-fi
-
-declare -A IPS
-declare -A NETMASKS
-declare -A GATEWAYS
-HWADDR=""
-
-for i in "${IFACES[@]}"; do
-  IPS[$i]=$(awk "/iface $i inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
-  NETMASKS[$i]=$(awk "/iface $i inet static/{f=1} f&&/netmask/{print \$2; exit}" "$CFG")
-  [ "$i" = "ens3" ] && \
-    GATEWAYS[$i]=$(awk "/iface $i inet static/{f=1} f&&/gateway/{print \$2; exit}" "$CFG")
-  HWADDR=$(awk "/iface ens3 inet static/{f=1} f&&/hwaddress/{print \$3; exit}" "$CFG")
+IPS=()
+for a in "${ALIASES[@]}"; do
+  ip=$(awk "/iface $a inet static/{f=1} f&&/address/{print \$2; exit}" "$CFG")
+  IPS+=("$a → $ip")
 done
 
-echo "==== Available IPs ===="
-PS3="Select IP to set as PRIMARY (ens3): "
+echo "==== Current Primary IP ===="
+echo "ens3 → $PRIMARY_IP"
+echo
+echo "==== Select IP to make PRIMARY ===="
 
-OPTIONS=()
-for i in "${IFACES[@]}"; do
-  OPTIONS+=("$i → ${IPS[$i]}")
-done
-
-select CHOICE in "${OPTIONS[@]}"; do
+select CHOICE in "${IPS[@]}"; do
   [ -n "$CHOICE" ] && break
 done
 
-TARGET_IFACE=$(echo "$CHOICE" | awk '{print $1}')
-NEW_PRIMARY_IP="${IPS[$TARGET_IFACE]}"
-NETMASK="${NETMASKS[$TARGET_IFACE]}"
-OLD_PRIMARY_IP="${IPS[ens3]}"
+TARGET_ALIAS=$(echo "$CHOICE" | awk '{print $1}')
+TARGET_IP=$(echo "$CHOICE" | awk '{print $3}')
 
-if [ "$TARGET_IFACE" = "ens3" ]; then
-  echo "✔ Already primary. Nothing to do."
-  exit 0
-fi
+echo
+echo "Swapping:"
+echo "ens3      : $PRIMARY_IP"
+echo "$TARGET_ALIAS : $TARGET_IP"
+echo
 
-# ساخت gateway جدید
-NEW_GATEWAY=$(echo "$NEW_PRIMARY_IP" | awk -F. '{print $1"."$2"."$3".1"}')
+read -p "Continue? (y/n): " c
+[ "$c" != "y" ] && exit 0
 
 BACKUP="$CFG.bak.$(date +%F_%H-%M-%S)"
 cp "$CFG" "$BACKUP"
-echo "✔ Backup saved: $BACKUP"
+echo "✔ Backup: $BACKUP"
 
-# بازنویسی فایل
-awk -v PIP="$NEW_PRIMARY_IP" -v OIP="$OLD_PRIMARY_IP" \
-    -v MASK="$NETMASK" -v GW="$NEW_GATEWAY" -v HW="$HWADDR" \
-    -v TGT="$TARGET_IFACE" '
-BEGIN {skip=0}
-/^auto ens3($|:)/ {skip=1; next}
-/^iface ens3($|:)/ {next}
-/^$/ {if(skip){skip=0; next}}
-!skip {print}
-END {
-print ""
-print "auto ens3"
-print "iface ens3 inet static"
-print "    address   " PIP
-print "    netmask   " MASK
-print "    gateway   " GW
-if(HW!="") print "    hwaddress ether " HW
-print "    dns-nameservers 1.1.1.1 8.8.8.8"
-print ""
-idx=0
-print "auto ens3:0"
-print "iface ens3:0 inet static"
-print "    address   " OIP
-print "    netmask   " MASK
-}
-' "$CFG" > /tmp/interfaces.new
+# جابه‌جایی IPها (فقط address)
+sed -i \
+  -e "/iface $IFACE inet static/{:a;n;/address/{s/$PRIMARY_IP/$TARGET_IP/;ba}}" \
+  -e "/iface $TARGET_ALIAS inet static/{:b;n;/address/{s/$TARGET_IP/$PRIMARY_IP/;bb}}" \
+  "$CFG"
 
-mv /tmp/interfaces.new "$CFG"
-
-echo "✔ interfaces file updated"
+echo "✔ IPs swapped in file"
 
 echo "▶ Restarting network..."
 systemctl restart networking || service networking restart
 
-echo "🎉 Done!"
-ip -4 addr show ens3
+echo "🎉 Done"
